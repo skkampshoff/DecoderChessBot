@@ -1,19 +1,66 @@
-# Transformer-Based Chess Bot
+## AI Chess Competition: Participant Guide
 
-With this project, we attempted to make a chess bot using a transformer decoder to predict the next move in the game. Our `preprocessing.ipynb` handled pulling in our data from Lichess and converting it into `.pt` files that our model later used. The `model.ipynb` has the code necessary for hyperparameter tuning and training the model (we had a major issue with the vm that caused us to lose the model we had trained for ~14 hours less than 12 hours before the submission deadline, so our final model is likely not as useful as it could have been). The `testing.ipynb` file shows our model's accuracy and some other useful metrics, and the `play.py` file provides the ability to play a game against the bot.
+Welcome to the AI Chess Competition! This guide tells you the rules, resources, and technicalities for developing and submitting your AI chess engine. The final competition will take place at [Nanocon](https://sites.google.com/view/dsunanocon/events/sunday?authuser=0)!
 
-### How we use our data
-The data we pull from Lichess comes in `.pgn` format and essentially captures recorded games move-by-move. We break these moves down into tokens and give them embeddings. We took a simple/naive approach to this that can be much improved upon to provide more meaningful context about a move to the model; however, working with our time constraint, this choice made the most sense. Each game then can be treated similar to a sentence, where one string representing a game can produce a large number of training data to the model. 
+## 1. General Rules
+* Team Size: 1-3 people
+* Signup: [this google form](https://forms.gle/eJiDRibwwXobutfSA)
+* Contact: for any questions, issues, or clarifications, reach out to one of the AI Club officers or Eddie French on Discord
+* Do not just clone GitHub repositories or do any form of plagiarism!
 
-### How our model works
-The model is simply doing next word prediction, only it is trained on chess moves as its vocabulary rather than a spoken language. It essentially is a next word predictor and displays why it might be that ChatGPT was very good at cheating when you would try to play it in chess in years past. 
+## 2. Materials Provided
+Sample chess bot:
+* A Python module will be provided containing boilerplate code and a working (not necessarily 'smart') sample bot.
+Accessory materials:
+* requirements.txt file (with the allowed python libraries)
+* Chess Rules PDF will be provided for reference on standard rules of play (e.g., castling, en passant, draw conditions)
+* Supplementary **videos** and an **intro to allowed libraries** may be provided to help new participants get started.
+Other resources we suggest you take advantage of:
+* [Simple Opening Database](https://www.kaggle.com/datasets/alexandrelemercier/all-chess-openings?select=openings_fen7.csv) (covering opening moves and/or end moves) to integrate into your engine.
+* [Simple Chess Database](https://www.kaggle.com/datasets/datasnaek/chess?select=games.csv) for training or reference
+* These files will be provided with the sample bot (see bot-spec.md for details), so you won't be required to download them yourself at the expense of training time
+* You may use any other publicly available dataset, but your training script must handle downloading them, which counts against alloted training time.
+* You may use the competition moderator to test your bot against the demo bots. To run with output in terminal, run `python -m compeition_moderator /path/to/white/bot /path/to/black/bot`. To run with graphical output, run `./visualize.sh /path/to/white/bot /path/to/black/bot`. Note: if running with gui, press `f` to toggle fullscreen.
 
-We did find that our model is very good at predicting the next move in the testing dataset, as can be seen in our `testing.ipynb`; however, there is a chance it is cheating and using training data in that. That said, being able to predict the next move does not necessarily translate to being good at playing against a person.
+## 3. Submission Guidelines
+* All submissions must be written in Python
+* The only allowed libraries:
+    * `numpy`
+    * `scikit-learn`
+    * `keras`
+    * `Pytorch`
+    * `tensorflow`
+    * `pandas`
+    * `python-chess`
+* No multiprocessing/multithreading please!
+* Submission deadline: **Thursday, November 6th, 11:59 pm**
+* Submission format: submit zipped folder containing a python module that complies with the bot specification (see bot-spec.md) via Discord
+* Final Competition Date: **Sunday, November 9th, 10:00 am**, at the Dakota Playhouse
 
-### How to play against it
-To play against our bot, run `python3 play.py` to pull up the game. The script will ask what color you are playing with, then enter `w` or `b`. User moves are taken in algebraic chess notation and the script will output the board in the terminal along with the bot's move. 
+## 4. Engine Parameters and Training
+* **Chess Engine:** You need to implement a functional **chess engine** using the allowed libraries. This can be neural, deterministic, or a mix of both!
+* **I/O** Use the INPUT and OUTPUT commands we supply for io (see bot spec). Both will be strings in SAN form.
+* **Hyperparameters:** Be prepared to detail and tune your model's **Hyperparameters**.
+* **Depth:** The **search depth** of your engine is a critical factor and must be optimized within the time constraints.
+* **Handling Training:** Your submission script will be run on the specified hardware. Ensure your training process is integrated in a reasonable fashion with the game playing script, or your model is pre-trained by the training script then saved in a manner that the game playing script can use.
+* **Handling Inference:** Your script must be optimized for fast and efficient **inference** during the match.
 
-Our bot is yet to be mated by Chess.com's Martin bot; however, that is in large part due to the fact that it frequently fails to produce a legal move and has to resign.
+## 5. Hardware and Time Constraints
+* **Hardware Specs:**
+* AMD Ryzen 9 5950X @ 5.09 GHz
+* NVIDIA RTX 3090
+* Persistent Memory:
+* Limit - 20GB disk space used per bot (data on disk which persists between training and playing)
+* Totals:
+* 64 GB RAM
+* 24 GB VRAM
+* Runtime Limits:
+* 25 GB RAM at any time PER PLAYER
+* 10 GB VRAM at any time PER PLAYER
+* **Time Limit:** 5 minutes per side to make ALL moves (similar to human time controls). That is, you have a 5 minute timer that counts down when it is your turn and stops when you submit your move. When you run out of time, you lose.
 
-### Extra files
-We have a number of other files that are not included in our submission to github, solely because of their size. These include our training data pulled from Lichess which is 46Gb and our encoded game tensors that were actually used for training.
+## 6. After Competition Period
+* After the competition concludes, we encourage teams to prepare and deliver a presentation on methodology, explaining your algorithm, training process, and time management strategies.
+* **Award:** The winning team will receive a **Raspberry Pi 4 kit**!
+
+**Have fun!**
