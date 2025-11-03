@@ -1,6 +1,7 @@
 import chess
 import random
 from .interface import Interface
+import pandas as pd
 
 import torch
 import torch.nn as nn
@@ -73,7 +74,11 @@ model.eval()
 
 def encode_moves(moves):
     """Convert a list of SAN moves into token ids with padding."""
-    tokens = [START_ID] + [move_to_id[m] for m in moves] + [END_ID]
+    # TODO: fix model to handle unknown tokens so we don't need the try/except block here
+    try:
+        tokens = [START_ID] + [move_to_id[m] for m in moves] + [END_ID]
+    except:
+        tokens = []
     if len(tokens) < MAX_LEN:
         tokens += [PAD_ID] * (MAX_LEN - len(tokens))
     else:
@@ -99,25 +104,68 @@ def get_legal_model_move(board, moves, k=10):
     return None  # No legal move found
 
 
+# =============== Opening ===============
+
+
+
 def play(interface: Interface, color = "w"):
     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     board = chess.Board(fen)
     moves = []
 
+    # set up opening db things
+    opening_db = pd.read_csv('shared_resources/openings_fen7.csv')
+    opening_db = opening_db[opening_db['winning_percentage'] > 50]
+    opening_db = opening_db.sort_values('winning_percentage', ascending=False)
+    opening_db = opening_db.drop_duplicates(subset='fen', keep='first')
+    openings = {} # openings dictionary
+    for _, row in opening_db.iterrows():
+        openings[row['fen']] = row['best_move']
+    in_opening = True
+
     if color == "b":
         move = interface.input()
         board.push_san(move)
+        moves.append(move)
 
+    # loop for playing openings
+    while in_opening:
+        move = None
+        fen = board.fen()
+        move_uci = openings.get(fen)
+        # get move if possible
+        if move_uci:
+            try:
+                move = chess.Move.from_uci(move_uci)
+            except:
+                continue
+
+        if move:
+            interface.output(board.san(move))
+            board.push(move)
+            moves.append(move)
+        else:
+            in_opening = False
+            break
+
+        move = interface.input()
+        board.push_san(move)
+        moves.append(move)    
+
+    # mid & endgame loop
     while True:
         bot_move = get_legal_model_move(board, moves, k=25)
         if bot_move and bot_move in [board.san(m) for m in board.legal_moves]:
             interface.output(board.san(bot_move))
             board.push(bot_move)
+            moves.append(bot_move)
         else: 
             all_moves = list(board.legal_moves)
             best_move = random.choice(all_moves)
             interface.output(board.san(best_move))
             board.push(best_move)
+            moves.append(best_move)
 
         move = interface.input()
         board.push_san(move)
+        moves.append(move)
