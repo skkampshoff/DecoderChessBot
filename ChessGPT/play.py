@@ -60,7 +60,9 @@ class ChessDecoder(nn.Module):
         if legal_moves_mask is not None:
             # Set logits of illegal moves to large negative value
             logits = logits.transpose(0, 1)  # [batch, seq_len, vocab_size]
-            logits = logits.masked_fill(~legal_moves_mask.unsqueeze(1), float('-inf'))
+            # Expand mask to match logits dimensions
+            expanded_mask = legal_moves_mask.unsqueeze(0).unsqueeze(0).expand(logits.size(0), logits.size(1), -1)
+            logits = logits.masked_fill(~expanded_mask, float('-inf'))
             return logits
             
         return logits.transpose(0, 1)  # [batch, seq_len, vocab_size]
