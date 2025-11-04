@@ -41,7 +41,7 @@ class ChessDecoder(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
         self.fc_out = nn.Linear(d_model, vocab_size)
 
-    def forward(self, x):
+    def forward(self, x, legal_moves_mask=None):
         # x shape: [batch, seq_len] → transformer expects [seq_len, batch]
         x = x.transpose(0, 1)
         seq_len, batch_size = x.size()
@@ -55,6 +55,14 @@ class ChessDecoder(nn.Module):
 
         x = self.decoder(x, x, tgt_mask=mask)
         logits = self.fc_out(x)  # [seq_len, batch, vocab_size]
+        
+        # Apply legal moves mask if provided
+        if legal_moves_mask is not None:
+            # Set logits of illegal moves to large negative value
+            logits = logits.transpose(0, 1)  # [batch, seq_len, vocab_size]
+            logits = logits.masked_fill(~legal_moves_mask.unsqueeze(1), float('-inf'))
+            return logits
+            
         return logits.transpose(0, 1)  # [batch, seq_len, vocab_size]
 
 model = ChessDecoder(
@@ -87,15 +95,22 @@ def encode_moves(moves):
 
 def get_legal_model_move(board, moves, k=10):
     x = encode_moves(moves).unsqueeze(0).to(device)
+    
+    # Create legal moves mask
+    legal_sans = {board.san(m): m for m in board.legal_moves}
+    legal_moves_mask = torch.zeros(vocab_size, device=device).bool()
+    for move_str in legal_sans.keys():
+        if move_str in move_to_id:
+            legal_moves_mask[move_to_id[move_str]] = True
+    
     with torch.no_grad():
-        logits = model(x)  # [1, seq_len, vocab]
+        logits = model(x, legal_moves_mask)  # [1, seq_len, vocab]
     next_token_logits = logits[0, len(moves), :]  # take next token prediction
     probs = torch.softmax(next_token_logits, dim=-1)
-
+    
     topk = torch.topk(probs, k)
     top_ids = topk.indices.tolist()
 
-    legal_sans = {board.san(m): m for m in board.legal_moves}
     for move_id in top_ids:
         move_str = id_to_move.get(move_id)
         if move_str in legal_sans:
