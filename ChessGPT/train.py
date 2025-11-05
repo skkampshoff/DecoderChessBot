@@ -1,210 +1,83 @@
+from utils import gpt_utils as gpt
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import json
-import chess
-import chess.pgn
-from collections import Counter
+from torch.utils.data import DataLoader
 
-class ChessTransformer(nn.Module):
-    def __init__(self, board_vocab_size=19, move_vocab_size=500, d_model=256, nhead=8, num_encoder_layers=4, num_decoder_layers=4, max_move_len=400):
-        super().__init__()
+from tqdm import tqdm
 
-        # encoder for board encodings
-        self.board_embed = nn.Embedding(board_vocab_size, d_model)
-        self.board_pos = nn.Embedding(69, d_model)  # 8x8 board + metadata
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=1024, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+def train():
+    # load in data
+    game_df = pd.read_csv('./shared_resources/games.csv')
+    game_df = game_df[['moves']]
+    game_df['fen_tokens'] = game_df['moves'].apply(lambda s: [gpt.fen_to_tokens(f) for f in gpt.moves_to_fens(s)])
 
-        # decoder for move prediction
-        self.move_embed = nn.Embedding(move_vocab_size, d_model)
-        self.move_pos = nn.Embedding(max_move_len, d_model)
-        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=1024, batch_first=True)
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
+    move_vocab = gpt.build_move_vocab(game_df)
+    dataset = gpt.ChessDataset(game_df, move_vocab)
+    dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-        self.fc_out = nn.Linear(d_model, move_vocab_size)
-
-    def forward(self, board_tokens, move_tokens, legal_moves_mask=None):
-        batch_size, seq_len = move_tokens.shape
-
-        move_tokens = move_tokens.clamp(0, self.move_embed.num_embeddings - 1)
-
-        # encoder
-        pos_indices = torch.arange(69, device=board_tokens.device).unsqueeze(0).expand_as(board_tokens)
-        enc_input = self.board_embed(board_tokens) + self.board_pos(pos_indices)
-        memory = self.encoder(enc_input)
-
-        # decoder
-        pos_indices = torch.arange(seq_len, device=board_tokens.device).unsqueeze(0).expand_as(move_tokens)
-        dec_input = self.move_embed(move_tokens) + self.move_pos(pos_indices)
-
-        # mask
-        tgt_mask = torch.triu(torch.ones(seq_len, seq_len, device=move_tokens.device), diagonal=1)
-        tgt_mask = tgt_mask.masked_fill(tgt_mask == 1, float('-inf'))
-
-        decoded = self.decoder(dec_input, memory, tgt_mask=tgt_mask)
-        logits = self.fc_out(decoded)
-
-        if legal_moves_mask is not None:
-            expanded_mask = legal_moves_mask.unsqueeze(0).unsqueeze(0).expand(logits.size(0), logits.size(1), -1)
-            logits = logits.masked_fill(~expanded_mask, float('-inf'))
-            return logits
-
-        return logits
-
-
-def fen_to_tokens(fen: str) -> torch.Tensor:
-    parts = fen.strip().split()
-    board_part, turn_part, castling_part = parts[0], parts[1], parts[2]
-
-    piece_to_id = {
-        '.': 0, 'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
-        'p': 7, 'n': 8, 'b': 9, 'r': 10, 'q': 11, 'k': 12
+    # hard coding params
+    params = {
+    'd_model': 128,
+    'nhead': 8,
+    'num_encoder_layers': 1,
+    'num_decoder_layers': 1,
+    'lr': 0.0004806284511583589
     }
 
-    board_tokens = []
-    for row in board_part.split('/'):
-        for ch in row:
-            if ch.isdigit():
-                board_tokens.extend([0]*int(ch))
-            else:
-                board_tokens.append(piece_to_id[ch])
-    assert len(board_tokens) == 64, f'Expected 64 squares, got {len(board_tokens)}'
+    # set up model, optimizer, & loss
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # model hyperparameters hardcoded from optuna tuning (results in utils.best_hyperparams.json)
+    model = gpt.ChessTransformer(
+        board_vocab_size=19,
+        move_vocab_size=len(move_vocab),
+        d_model=params['d_model'],
+        nhead=params['nhead'],
+        num_encoder_layers=params['num_encoder_layers'],
+        num_decoder_layers=params['num_decoder_layers'],
+        #lr=params['lr']
+    ).to(device)
 
-    turn_token = 13 if turn_part == 'w' else 14
-    castling_vec = [token_id if symbol in castling_part else 0 for symbol, token_id in zip('KQkq', range(15, 19))]
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0004806284511583589)
+    criterion = nn.CrossEntropyLoss(ignore_index=move_vocab['<PAD>'])
 
-    all_tokens = [turn_token] + castling_vec + board_tokens
-    return torch.tensor(all_tokens, dtype=torch.long)
+    # training loop
+    num_epochs = 10
+    print(f'Starting training on {device} for {num_epochs} epochs...')
 
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0.0
 
-def build_move_vocab(df, min_freq=5) -> dict:
-    all_moves = []
-    for san_str in df['moves']:
-        all_moves.extend(san_str.split())
-    counter = Counter(all_moves)
-    vocab = {move: i + 4 for i, (move, count) in enumerate(counter.items()) if count >= min_freq}
-    vocab['<PAD>'] = 0
-    vocab['<SOS>'] = 1
-    vocab['<EOS>'] = 2
-    vocab['<UNK>'] = 3
-    return vocab
+        progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=False)
+        for batch_idx, (b_tokens, m_tokens) in enumerate(progress_bar):
+            b_tokens, m_tokens = [x.to(device) for x in (b_tokens, m_tokens)]
+            optimizer.zero_grad()
 
+            m_tokens = m_tokens.unsqueeze(1)
+            logits = model(b_tokens, m_tokens)
+            target = m_tokens.squeeze(1).clamp(0, logits.size(-1) - 1)
 
-def moves_to_fens(moves_str) -> list:
-    board = chess.Board()
-    fens = []
-    for move_san in moves_str.split():
-        fens.append(board.fen())
-        move = board.parse_san(move_san)
-        board.push(move)
-    return fens
+            loss = criterion(logits.squeeze(1), target)
+            loss.backward()
+            optimizer.step()
 
+            total_loss += loss.item()
+            progress_bar.set_postfix(loss=loss.item())
 
-game_df = pd.read_csv('./shared_resources/games.csv')
-game_df = game_df[['moves']]
-game_df['fen_tokens'] = game_df['moves'].apply(lambda s: [fen_to_tokens(f) for f in moves_to_fens(s)])
+        avg_loss = total_loss / len(dataloader)
+        print(f'Epoch [{epoch+1}/{num_epochs}] | Train Loss: {avg_loss:.4f}')
 
-move_vocab = build_move_vocab(game_df)
+        # save checkpoint
+        chpt_path = f'./utils/checkpoints/model_epoch_{epoch+1}.pt'
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': avg_loss,
+            'params': params
+        })
+    print('Training Complete')
 
-import optuna
-from sklearn.model_selection import KFold
-from torch.utils.data import Dataset, DataLoader
-
-class ChessDataset(Dataset):
-    def __init__(self, df, move_vocab):
-        self.samples = []
-
-        for idx, row in df.iterrows():
-            move_tokens = row['moves'].split()
-            fen_tokens_list = row['fen_tokens']  # use precomputed tokens
-
-            for board_tokens, move_san in zip(fen_tokens_list, move_tokens):
-                move_token = move_vocab.get(move_san, move_vocab['<UNK>'])
-                self.samples.append((board_tokens, move_token))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        b, m = self.samples[idx]
-        return b, torch.tensor(m)
-
-
-def objective(trial):
-    d_model = trial.suggest_categorical('d_model', [128, 256])
-    nhead = trial.suggest_categorical('nhead', [4, 8])
-    num_encoder_layers = trial.suggest_int('num_encoder_layers', 1, 3)
-    num_decoder_layers = trial.suggest_int('num_decoder_layers', 1, 3)
-    lr = trial.suggest_float('lr', 1e-4, 1e-3)
-
-    kf = KFold(n_splits=3, shuffle=True, random_state=42)
-    val_losses = []
-
-    for train_idx, val_idx in kf.split(game_df):
-        subset_size = 2000
-        train_subset = game_df.iloc[train_idx].sample(n=subset_size, random_state=trial.number)
-        val_subset = game_df.iloc[val_idx].sample(n=int(subset_size * 0.2), random_state=trial.number)
-
-        train_ds = ChessDataset(train_subset, move_vocab)
-        val_ds = ChessDataset(val_subset, move_vocab)
-
-        train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=64)
-
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = ChessTransformer(
-            board_vocab_size=19,
-            move_vocab_size=len(move_vocab),
-            d_model=d_model,
-            nhead=nhead,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers
-        ).to(device)
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss(ignore_index=move_vocab['<PAD>'])
-
-        for epoch in range(5):
-            model.train()
-            epoch_loss = 0
-            for batch_idx, batch in enumerate(train_loader):
-                b_tokens, m_tokens = [x.to(device) for x in batch]
-                optimizer.zero_grad()
-                m_tokens = m_tokens.unsqueeze(1)  # [batch, 1]
-                logits = model(b_tokens, m_tokens)
-                target = m_tokens.squeeze(1)  # [batch]
-                target = target.clamp(0, logits.size(-1) - 1)
-                loss = criterion(logits.squeeze(1), target)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-            print(f'Trial {trial.number}, Epoch {epoch + 1}, Train loss: {epoch_loss / len(train_loader):.4f}')
-
-        model.eval()
-        val_loss = 0
-        count = 0
-        with torch.no_grad():
-            for batch in val_loader:
-                b_tokens, m_tokens = [x.to(device) for x in batch]
-                m_tokens = m_tokens.unsqueeze(1)
-                logits = model(b_tokens, m_tokens)
-                target = m_tokens.squeeze(1)
-                target = target.clamp(0, logits.size(-1) - 1)
-                l = criterion(logits.squeeze(1), target)
-                val_loss += l.item()
-                count += 1
-        val_losses.append(val_loss / count)
-
-    return sum(val_losses) / len(val_losses)
-
-
-study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler())
-study.optimize(objective, n_trials=10, show_progress_bar=True)
-
-best_params = study.best_trial.params
-with open('best_hyperparams.json', 'w') as f:
-    json.dump(best_params, f)
-
-print("Best hyperparameters:", best_params)
+if __name__ == '__main__':
+    train()
