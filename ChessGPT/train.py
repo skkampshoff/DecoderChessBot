@@ -1,5 +1,6 @@
-from utils import gpt_utils as gpt
 import pandas as pd
+import os
+import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -8,11 +9,26 @@ from tqdm import tqdm
 
 def train():
     # load in data
-    game_df = pd.read_csv('./shared_resources/games.csv')
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    from utils import gpt_utils as gpt
+    
+    game_df = pd.read_csv(os.path.join(BASE_DIR, '../shared_resources/games.csv'))
     game_df = game_df[['moves']]
     game_df['fen_tokens'] = game_df['moves'].apply(lambda s: [gpt.fen_to_tokens(f) for f in gpt.moves_to_fens(s)])
 
+    # generate and store vocab
     move_vocab = gpt.build_move_vocab(game_df)
+    '''
+    vocab_path = os.path.join(BASE_DIR, 'utils/move_vocab.json')
+    with open(vocab_path, 'w') as f:
+        json.dump(move_vocab, f, indent=2)
+    
+    # pull in vocab
+    vocab_path = os.path.join(BASE_DIR, 'utils/move_vocab.json')
+    with open(vocab_path, 'r') as f:
+        move_vocab = json.load(f)
+    '''
+
     dataset = gpt.ChessDataset(game_df, move_vocab)
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
@@ -35,7 +51,6 @@ def train():
         nhead=params['nhead'],
         num_encoder_layers=params['num_encoder_layers'],
         num_decoder_layers=params['num_decoder_layers'],
-        #lr=params['lr']
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0004806284511583589)
@@ -69,14 +84,14 @@ def train():
         print(f'Epoch [{epoch+1}/{num_epochs}] | Train Loss: {avg_loss:.4f}')
 
         # save checkpoint
-        chpt_path = f'./utils/checkpoints/model_epoch_{epoch+1}.pt'
+        ckpt_path = os.path.join(BASE_DIR, f'utils/checkpoints/model_epoch_{epoch+1}.pt')
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': avg_loss,
             'params': params
-        })
+        }, ckpt_path)
     print('Training Complete')
 
 if __name__ == '__main__':
