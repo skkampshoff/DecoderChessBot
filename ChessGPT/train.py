@@ -4,30 +4,30 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from ChessGPT.utils import gpt_utils as gpt
 
 from tqdm import tqdm
 
 def train():
     # load in data
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    from utils import gpt_utils as gpt
     
     game_df = pd.read_csv(os.path.join(BASE_DIR, '../shared_resources/games.csv'))
     game_df = game_df[['moves']]
     game_df['fen_tokens'] = game_df['moves'].apply(lambda s: [gpt.fen_to_tokens(f) for f in gpt.moves_to_fens(s)])
 
+    '''
     # generate and store vocab
     move_vocab = gpt.build_move_vocab(game_df)
-    '''
     vocab_path = os.path.join(BASE_DIR, 'utils/move_vocab.json')
     with open(vocab_path, 'w') as f:
         json.dump(move_vocab, f, indent=2)
+    '''
     
     # pull in vocab
     vocab_path = os.path.join(BASE_DIR, 'utils/move_vocab.json')
     with open(vocab_path, 'r') as f:
         move_vocab = json.load(f)
-    '''
 
     dataset = gpt.ChessDataset(game_df, move_vocab)
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True)

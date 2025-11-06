@@ -7,122 +7,107 @@ import torch
 import torch.nn as nn
 import json
 import os
+from ChessGPT.utils import gpt_utils as gpt
 
 this_script_dir = os.path.dirname(os.path.abspath(__file__)) # path to this script's directory
+
+MAX_LEN = 400  # same length used in training
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load move mapping
-mti_path = os.path.join(this_script_dir, 'move_to_id.json')
+mti_path = os.path.join(this_script_dir, 'utils/move_vocab.json')
 with open(mti_path, "r") as f:
     move_to_id = json.load(f)
 id_to_move = {v: k for k, v in move_to_id.items()}
 
 PAD_ID = move_to_id["<PAD>"]
-START_ID = move_to_id["<START>"]
-END_ID = move_to_id["<END>"]
+START_ID = move_to_id["<SOS>"]
+END_ID = move_to_id["<EOS>"]
 
 vocab_size = len(move_to_id)
 
 # Load best hyperparams
-bh_path = os.path.join(this_script_dir, 'best_hparams.json')
+bh_path = os.path.join(this_script_dir, 'utils/best_hyperparams.json')
 with open(bh_path, "r") as f:
-    best_hparams = json.load(f)
-params = best_hparams["best_params"]
+    params = json.load(f)
 
-MAX_LEN = 200  # same length used in training
 
-# =============== Model Definition ===============
-class ChessDecoder(nn.Module):
-    def __init__(self, vocab_size, d_model=256, nhead=8, num_layers=4, max_len=200):
-        super().__init__()
-        self.embed = nn.Embedding(vocab_size, d_model)
-        self.pos_embed = nn.Embedding(max_len, d_model)
-        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=1024)
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        self.fc_out = nn.Linear(d_model, vocab_size)
-
-    def forward(self, x, legal_moves_mask=None):
-        # x shape: [batch, seq_len] → transformer expects [seq_len, batch]
-        x = x.transpose(0, 1)
-        seq_len, batch_size = x.size()
-
-        # Add embeddings
-        positions = torch.arange(seq_len, device=x.device).unsqueeze(1)
-        x = self.embed(x) + self.pos_embed(positions)
-
-        # Decoder masking: prevent attention to future tokens
-        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
-
-        x = self.decoder(x, x, tgt_mask=mask)
-        logits = self.fc_out(x)  # [seq_len, batch, vocab_size]
-        
-        # Apply legal moves mask if provided
-        if legal_moves_mask is not None:
-            # Set logits of illegal moves to large negative value
-            logits = logits.transpose(0, 1)  # [batch, seq_len, vocab_size]
-            # Expand mask to match logits dimensions
-            expanded_mask = legal_moves_mask.unsqueeze(0).unsqueeze(0).expand(logits.size(0), logits.size(1), -1)
-            logits = logits.masked_fill(~expanded_mask, float('-inf'))
-            return logits
-            
-        return logits.transpose(0, 1)  # [batch, seq_len, vocab_size]
-
-model = ChessDecoder(
-    vocab_size=vocab_size,
-    d_model=params["d_model"],
-    nhead=params["nhead"],
-    num_layers=params["num_layers"],
-    max_len=MAX_LEN
+# load in model
+model_path = os.path.join(this_script_dir, 'utils', 'checkpoints', 'model_epoch_10.pt')
+model = gpt.ChessTransformer(
+    board_vocab_size=19,
+    move_vocab_size=vocab_size,
+    d_model=params['d_model'],
+    nhead=params['nhead'],
+    num_encoder_layers=params['num_encoder_layers'],
+    num_decoder_layers=params['num_decoder_layers'],
+    max_move_len=MAX_LEN
 ).to(device)
 
-# model.load_state_dict(torch.load("best_model.pt", map_location=device))
-model_path = os.path.join(this_script_dir, '500k_model.pt')
-model.load_state_dict(torch.load(model_path, map_location=device))
+# load weights
+checkpoint = torch.load(model_path, map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
 model.eval()
+gpt.model = model
 
-# =============== Helpers ===============
-
-def encode_moves(moves):
-    """Convert a list of SAN moves into token ids with padding."""
-    # TODO: fix model to handle unknown tokens so we don't need the try/except block here
-    try:
-        tokens = [START_ID] + [move_to_id[m] for m in moves] + [END_ID]
-    except:
-        tokens = []
-    if len(tokens) < MAX_LEN:
-        tokens += [PAD_ID] * (MAX_LEN - len(tokens))
-    else:
-        tokens = tokens[:MAX_LEN]
-    return torch.tensor(tokens, dtype=torch.long)
-
+# generate move prediction
 def get_legal_model_move(board, moves, k=10):
-    x = encode_moves(moves).unsqueeze(0).to(device)
-    
-    # Create legal moves mask
+    '''
+    Generate a model-predicted legal move for the current board state.
+
+    Args: 
+        board (chess.Board): Current board position.
+        moves (list[str]): Move history in SAN format.
+        k (int): Top-k moves to sample from
+
+    Returns:
+        chess.Move or None
+    '''
+
+    # encode current board
+    board_tokens = gpt.fen_to_tokens(board.fen()).unsqueeze(0).to(device)
+
+    # encode move history
+    move_ids = []
+    for m in moves[-MAX_LEN:]: # truncate when needed
+        move_ids.append(move_to_id.get(m, move_to_id['<UNK>']))
+    move_ids = [START_ID] + move_ids[-(MAX_LEN - 2):] + [END_ID]
+    move_tensor = torch.tensor(move_ids, dtype=torch.long, device=device).unsqueeze(0)
+
+    # legal move mask
     legal_sans = {board.san(m): m for m in board.legal_moves}
-    legal_moves_mask = torch.zeros(vocab_size, device=device).bool()
+    legal_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+
+    unk_id = move_to_id.get("<UNK>", None)
+
     for move_str in legal_sans.keys():
-        if move_str in move_to_id:
-            legal_moves_mask[move_to_id[move_str]] = True
+        move_id = move_to_id.get(move_str, unk_id)
+        if move_id is not None:
+            legal_mask[move_id] = True
     
+    # forward pass through model
     with torch.no_grad():
-        logits = model(x, legal_moves_mask)  # [1, seq_len, vocab]
-    next_token_logits = logits[0, len(moves), :]  # take next token prediction
-    probs = torch.softmax(next_token_logits, dim=-1)
-    
-    topk = torch.topk(probs, k)
-    top_ids = topk.indices.tolist()
+        logits = gpt.model(board_tokens, move_tensor, legal_moves_mask=legal_mask)
+        next_token_logits = logits[0, -1, :]
+        probs = torch.softmax(next_token_logits, dim=-1)
 
-    for move_id in top_ids:
-        move_str = id_to_move.get(move_id)
-        if move_str in legal_sans:
-            return legal_sans[move_str]  # First legal move found
+    # restrict to legal moves
+    legal_probs = probs * legal_mask
+    legal_probs /= legal_probs.sum() + 1e-8 # normalize
 
-    return None  # No legal move found
+    # select top k legal moves
+    topk = torch.topk(legal_probs, k=min(k, legal_mask.sum().item()))
+    top_indices = topk.indices.tolist()
+    top_moves = [id_to_move[i] for i in top_indices if id_to_move[i] in legal_sans]
 
-
-# =============== Opening ===============
-
+    # choose from top-k
+    for move_str in top_moves:
+        try:
+            move = legal_sans[move_str]
+            return move
+        except KeyError:
+            continue
+    return None
 
 
 def play(interface: Interface, color = "w"):
@@ -131,7 +116,7 @@ def play(interface: Interface, color = "w"):
     moves = []
 
     # set up opening db things
-    opening_db = pd.read_csv('shared_resources/openings_fen7.csv')
+    opening_db = pd.read_csv(os.path.join(this_script_dir, '../shared_resources/openings_fen7.csv'))
     opening_db = opening_db[opening_db['winning_percentage'] > 50]
     opening_db = opening_db.sort_values('winning_percentage', ascending=False)
     opening_db = opening_db.drop_duplicates(subset='fen', keep='first')
